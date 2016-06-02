@@ -22,14 +22,7 @@ def get_directory():
     the site's ID if ``MEDIA_LIBRARY_PER_SITE`` is ``True``, and also
     creating the root directory if missing.
     """
-    from mezzanine.conf import settings as mezz_settings
-    from mezzanine.utils.sites import current_site_id
     dirname = DIRECTORY
-    if getattr(mezz_settings, "MEDIA_LIBRARY_PER_SITE", False):
-        dirname = os.path.join(dirname, "site-%s" % current_site_id())
-    fullpath = os.path.join(mezz_settings.MEDIA_ROOT, dirname)
-    if not default_storage.isdir(fullpath):
-        default_storage.makedirs(fullpath)
     return dirname
 
 

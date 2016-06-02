@@ -69,7 +69,7 @@ class FileSystemStorageMixin(StorageMixin):
 class S3BotoStorageMixin(StorageMixin):
 
     def isfile(self, name):
-        return self.exists(name) and self.size(name) > 0
+        return "." in name
 
     def isdir(self, name):
         # That's some inefficient implementation...
