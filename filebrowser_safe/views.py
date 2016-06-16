@@ -3,6 +3,7 @@ from __future__ import unicode_literals
 from json import dumps
 import os
 import re
+import datetime
 
 from django.conf import settings as django_settings
 from django.contrib.admin.views.decorators import staff_member_required
@@ -34,6 +35,7 @@ from filebrowser_safe.functions import (get_path, get_breadcrumbs,
 from filebrowser_safe.templatetags.fb_tags import query_helper
 from filebrowser_safe.base import FileObject
 from filebrowser_safe.decorators import flash_login_required
+from filebrowser_safe.models import FileBrowserItem
 
 from mezzanine.utils.importing import import_dotted_path
 
@@ -87,88 +89,76 @@ def browse(request):
 
     # QUERY / PATH CHECK
     query = request.GET.copy()
-    path = get_path(query.get('dir', ''))
-    directory = get_path('')
+    path_relative = query.get('dir', '')
 
-    if path is None:
-        msg = _('The requested Folder does not exist.')
-        messages.add_message(request, messages.ERROR, msg)
-        if directory is None:
-            # The directory returned by get_directory() does not exist, raise an error to prevent eternal redirecting.
-            raise ImproperlyConfigured(_("Error finding Upload-Folder. Maybe it does not exist?"))
-        redirect_url = reverse("fb_browse") + query_helper(query, "", "dir")
-        return HttpResponseRedirect(redirect_url)
-    abs_path = os.path.join(get_directory(), path)
+    parent = None
+    if path_relative:
+        parent_query = FileBrowserItem.objects.filter(
+            path_relative_directory=path_relative,
+            filetype='folder')
+        if not parent_query.exists():
+            msg = _('The requested Folder does not exist.')
+            messages.add_message(request, messages.ERROR, msg)
+            redirect_url = reverse("fb_browse") + query_helper(query, "", "dir")
+            return HttpResponseRedirect(redirect_url)
+
+        else:
+            parent = parent_query.first()
+
+    files_query = FileBrowserItem.objects.filter(parent=parent)
 
     # INITIAL VARIABLES
-    results_var = {'results_total': 0, 'results_current': 0, 'delete_total': 0, 'images_total': 0, 'select_total': 0}
+    results_var = {
+        'results_total': files_query.count(),
+        'results_current': 0,
+        'delete_total': 0,
+        'images_total': files_query.filter(filetype='image').count(),
+        'select_total': 0
+    }
     counter = {}
     for k, v in EXTENSIONS.items():
-        counter[k] = 0
+        counter[k] = files_query.filter(filetype=k.lower()).count()
 
-    dir_list, file_list = default_storage.listdir(abs_path)
     files = []
     filter_date = request.GET.get('filter_date', '')
-    for file in dir_list + file_list:
 
-        # EXCLUDE FILES MATCHING VERSIONS_PREFIX OR ANY OF THE EXCLUDE PATTERNS
-        filtered = not file or file.startswith('.')
-        for re_prefix in filter_re:
-            if re_prefix.search(file):
-                filtered = True
-        if filtered:
-            continue
-        results_var['results_total'] += 1
+    if request.GET.get('q', None):
+        files_query = files_query.filter(
+            filename__icontains=request.GET.get('q').lower())
 
-        # CREATE FILEOBJECT
-        url_path = "/".join([s.strip("/") for s in
-                            [get_directory(), path, file] if s.strip("/")])
-        fileobject = FileObject(url_path)
-
-        # FILTER / SEARCH
-        append = False
-        if fileobject.filetype == request.GET.get('filter_type', fileobject.filetype):
-            if filter_date:
-                append = True if get_filterdate(filter_date, fileobject.date) else False
-            else:
-                append = True
-        if request.GET.get('q') and not re.compile(request.GET.get('q').lower(), re.M).search(file.lower()):
-            append = False
-
-        # APPEND FILE_LIST
-        if append:
-            try:
-                # COUNTER/RESULTS
-                if fileobject.filetype == 'Image':
-                    results_var['images_total'] += 1
-                if fileobject.filetype != 'Folder':
-                    results_var['delete_total'] += 1
-                elif fileobject.filetype == 'Folder' and fileobject.is_empty:
-                    results_var['delete_total'] += 1
-                if query.get('type') and query.get('type') in SELECT_FORMATS and fileobject.filetype in SELECT_FORMATS[query.get('type')]:
-                    results_var['select_total'] += 1
-                elif not query.get('type'):
-                    results_var['select_total'] += 1
-            except OSError:
-                # Ignore items that have problems
-                continue
-            else:
-                files.append(fileobject)
-                results_var['results_current'] += 1
-
-        # COUNTER/RESULTS
-        if fileobject.filetype:
-            counter[fileobject.filetype] += 1
+    if filter_date:
+        today = datetime.date.today()
+        if filter_date == 'today':
+            files_query = files_query.filter(
+                datetime=today)
+        elif filter_date == 'thismonth':
+            files_query = files_query.filter(
+                datetime__year=today.year,
+                datetime__month=today.month)
+        elif filter_date == 'thisyear':
+            files_query = files_query.filter(
+                datetime__year=today.year)
+        elif filter_date == 'past7days':
+            week_ago = datetime.datetime.now() - datetime.timedelta(days=7)
+            files_query = files_query.filter(
+                datetime__gte=week_ago)
 
     # SORTING
     query['o'] = request.GET.get('o', DEFAULT_SORTING_BY)
     query['ot'] = request.GET.get('ot', DEFAULT_SORTING_ORDER)
-    defaultValue = ''
-    if query['o'] in ['date', 'filesize']:
-        defaultValue = 0.0
-    files = sorted(files, key=lambda f: getattr(f, query['o']) or defaultValue)
-    if not request.GET.get('ot') and DEFAULT_SORTING_ORDER == "desc" or request.GET.get('ot') == "desc":
-        files.reverse()
+    if query['o'] == 'date':
+        order_by = 'datetime'
+    else:
+        order_by = query['o']
+    if not request.GET.get('ot') \
+            and DEFAULT_SORTING_ORDER == "desc" \
+            or request.GET.get('ot') == "desc":
+        order_by = '-' + order_by
+
+    files_query = files_query.order_by(order_by)
+    files = list(files_query)
+
+    results_var['results_current'] = files_query.count()
 
     p = Paginator(files, LIST_PER_PAGE)
     try:
@@ -181,7 +171,7 @@ def browse(request):
         page = p.page(p.num_pages)
 
     return render_to_response('filebrowser/index.html', {
-        'dir': path,
+        'dir': path_relative,
         'p': p,
         'page': page,
         'results_var': results_var,
@@ -189,7 +179,7 @@ def browse(request):
         'query': query,
         'title': _(u'Media Library'),
         'settings_var': get_settings_var(),
-        'breadcrumbs': get_breadcrumbs(query, path),
+        'breadcrumbs': get_breadcrumbs(query, path_relative),
         'breadcrumbs_title': ""
     }, context_instance=Context(request))
 browse = staff_member_required(never_cache(browse))
@@ -210,11 +200,20 @@ def mkdir(request):
 
     # QUERY / PATH CHECK
     query = request.GET
-    path = get_path(query.get('dir', ''))
-    if path is None:
-        msg = _('The requested Folder does not exist.')
-        messages.add_message(request, messages.ERROR, msg)
-        return HttpResponseRedirect(reverse("fb_browse"))
+    path_relative = query.get('dir', '')
+    path = ''
+    parent = None
+    if path_relative:
+        parent_query = FileBrowserItem.objects.filter(
+            path_relative_directory=path_relative,
+            filetype='folder')
+        if not parent_query.exists():
+            msg = _('The requested Folder does not exist.')
+            messages.add_message(request, messages.ERROR, msg)
+            return HttpResponseRedirect(reverse("fb_browse"))
+        else:
+            parent = parent_query.first()
+            path = path_relative
     abs_path = os.path.join(get_directory(), path)
 
     if request.method == 'POST':
@@ -228,6 +227,19 @@ def mkdir(request):
                 default_storage.makedirs(server_path)
                 # POST CREATE SIGNAL
                 filebrowser_post_createdir.send(sender=request, path=path, dirname=form.cleaned_data['dir_name'])
+
+                fileobject = FileObject(server_path)
+                FileBrowserItem.objects.create(
+                    filename=fileobject.filename,
+                    parent=parent,
+                    path=fileobject.path,
+                    path_relative_directory=fileobject.path_relative_directory,
+                    url=fileobject.url,
+                    extension=fileobject.extension,
+                    filetype=fileobject.filetype.lower(),
+                    filesize=fileobject.filesize,
+                    datetime=fileobject.datetime
+                )
                 # MESSAGE & REDIRECT
                 msg = _('The Folder %s was successfully created.') % (form.cleaned_data['dir_name'])
                 messages.add_message(request, messages.SUCCESS, msg)
@@ -266,11 +278,19 @@ def upload(request):
 
     # QUERY / PATH CHECK
     query = request.GET
-    path = get_path(query.get('dir', ''))
-    if path is None:
-        msg = _('The requested Folder does not exist.')
-        messages.add_message(request, messages.ERROR, msg)
-        return HttpResponseRedirect(reverse("fb_browse"))
+    path_relative = query.get('dir', '')
+    path = ''
+    parent = None
+    if path_relative:
+        parent_query = FileBrowserItem.objects.filter(
+            path_relative_directory=path_relative,
+            filetype='folder')
+        if not parent_query.exists():
+            msg = _('The requested Folder does not exist.')
+            messages.add_message(request, messages.ERROR, msg)
+            return HttpResponseRedirect(reverse("fb_browse"))
+        else:
+            path = path_relative
 
     # SESSION (used for flash-uploading)
     cookie_dict = parse_cookie(request.META.get('HTTP_COOKIE', ''))
@@ -326,6 +346,12 @@ def _upload_file(request):
         if "." in folder:
             return HttpResponseBadRequest("")
 
+        parent_path = folder if folder else None
+        parent_query = FileBrowserItem.objects.filter(
+            path_relative_directory=parent_path,
+            filetype='folder')
+        parent = parent_query.first()
+
         if request.FILES:
             filedata = request.FILES['Filedata']
             directory = get_directory()
@@ -352,6 +378,21 @@ def _upload_file(request):
 
             # POST UPLOAD SIGNAL
             filebrowser_post_upload.send(sender=request, path=request.POST.get('folder'), file=FileObject(smart_text(file_path)))
+
+            if not FileBrowserItem.objects.filter(path=file_path).exists():
+                fileobject = FileObject(file_path)
+                FileBrowserItem.objects.create(
+                    filename=fileobject.filename,
+                    parent=parent,
+                    path=fileobject.path,
+                    path_relative_directory=fileobject.path_relative_directory,
+                    url=fileobject.url,
+                    extension=fileobject.extension,
+                    filetype=fileobject.filetype.lower(),
+                    filesize=fileobject.filesize,
+                    datetime=fileobject.datetime
+                )
+
         get_params = request.POST.get('get_params')
         if get_params:
             return HttpResponseRedirect(reverse('fb_browse') + get_params)
@@ -401,6 +442,10 @@ def delete(request):
             default_storage.delete(os.path.join(abs_path, filename))
             # POST DELETE SIGNAL
             filebrowser_post_delete.send(sender=request, path=path, filename=filename)
+
+            ### TODO REMOVE FILES IN FOLDER
+
+            FileBrowserItem.objects.filter(path=normalized).delete()
             # MESSAGE & REDIRECT
             msg = _('The file %s was successfully deleted.') % (filename.lower())
             messages.add_message(request, messages.SUCCESS, msg)
@@ -415,6 +460,7 @@ def delete(request):
             default_storage.rmtree(os.path.join(abs_path, filename))
             # POST DELETE SIGNAL
             filebrowser_post_delete.send(sender=request, path=path, filename=filename)
+            FileBrowserItem.objects.filter(path=normalized).delete()
             # MESSAGE & REDIRECT
             msg = _('The folder %s was successfully deleted.') % (filename.lower())
             messages.add_message(request, messages.SUCCESS, msg)
@@ -469,6 +515,14 @@ def rename(request):
                 default_storage.move(relative_server_path, new_relative_server_path)
                 # POST RENAME SIGNAL
                 filebrowser_post_rename.send(sender=request, path=path, filename=filename, new_filename=new_filename)
+
+                fileobject = FileObject(new_relative_server_path)
+                FileBrowserItem.objects.filter(path=relative_server_path).update(
+                    filename=fileobject.filename,
+                    path=fileobject.path,
+                    path_relative_directory=fileobject.path_relative_directory,
+                    url=fileobject.url,
+                )
                 # MESSAGE & REDIRECT
                 msg = _('Renaming was successful.')
                 messages.add_message(request, messages.SUCCESS, msg)
