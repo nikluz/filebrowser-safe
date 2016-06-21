@@ -126,6 +126,10 @@ def browse(request):
         files_query = files_query.filter(
             filename__icontains=request.GET.get('q').lower())
 
+    filter_type = request.GET.get('filter_type', None)
+    if filter_type:
+        files_query = files_query.filter(filetype=filter_type.lower())
+
     if filter_date:
         today = datetime.date.today()
         if filter_date == 'today':
@@ -160,6 +164,14 @@ def browse(request):
 
     results_var['results_current'] = files_query.count()
 
+    if not query.get('type'):
+        results_var['select_total'] = results_var['results_current']
+    else:
+        if query.get('type') in SELECT_FORMATS:
+            filetypes = [t.lower() for t in SELECT_FORMATS[query.get('type')]]
+            results_var['select_total'] = files_query.filter(
+                filetype__in=filetypes)
+
     p = Paginator(files, LIST_PER_PAGE)
     try:
         page_nr = request.GET.get('p', '1')
@@ -169,7 +181,6 @@ def browse(request):
         page = p.page(page_nr)
     except (EmptyPage, InvalidPage):
         page = p.page(p.num_pages)
-
     return render_to_response('filebrowser/index.html', {
         'dir': path_relative,
         'p': p,
